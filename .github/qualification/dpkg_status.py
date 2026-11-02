@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import zipfile
 from urllib.parse import unquote, urlparse
 
 BASE = "15f9fc8d39ba3178c313e61d94feb3f6eb88f95f"
@@ -54,8 +55,15 @@ def bazel(args: list[str], cwd: Path, name: str, expected: int = 0) -> str:
 
 def test(row: dict, name: str, cwd: Path, labels: list[str], flags: list[str], expected: dict[str, str]) -> None:
     bep = WORK / (name + ".bep.json")
-    result = command(["bazel", "test", *flags, "--nocache_test_results", "--test_output=errors", "--build_event_json_file=" + str(bep), *labels], cwd, name)
+    result = command(["bazel", "test", *flags, "--nocache_test_results", "--keep_going", "--test_output=errors", "--build_event_json_file=" + str(bep), *labels], cwd, name)
     row["exit"] = result.returncode
+    if result.returncode:
+        lines = (result.stdout + result.stderr).splitlines()
+        starts = [i for i, line in enumerate(lines) if "ERROR:" in line or "Traceback" in line]
+        context = "\n".join(lines[starts[0]:starts[0] + 35]) if starts else "\n".join(lines[-25:])
+        if token := os.environ.get("BAZELISK_GITHUB_TOKEN"):
+            context = context.replace(token, "[REDACTED]")
+        row["diagnostic"] = context[:9000]
     events = [json.loads(line) for line in bep.read_text().splitlines()] if bep.exists() else []
     summaries = {event["id"]["testSummary"]["label"]: event["testSummary"]["overallStatus"] for event in events if "testSummary" in event}
     row["summaries"] = summaries
@@ -178,18 +186,29 @@ if sys.argv[1:] == ["--scan"]:
     raise SystemExit(0)
 
 
-assert subprocess.check_output(["git", "rev-parse", "HEAD^"], text=True).strip() == PRODUCT
-assert subprocess.check_output(["git", "rev-parse", "HEAD^^"], text=True).strip() == BASE
-phase("format", formatting)
-phase("unit", owners)
-original = {path: (ROOT / path).read_bytes() for path in RESTORE}
-try:
-    for path in RESTORE:
-        (ROOT / path).write_bytes(subprocess.check_output(["git", "show", BASE + ":" + path]))
-    phase("stock-amd64", lambda row: smoke(row, "amd64", True))
-finally:
-    for path, contents in original.items():
-        (ROOT / path).write_bytes(contents)
+def retained(row: dict) -> None:
+    original = WORK / "original.zip"
+    digest = hashlib.sha256(original.read_bytes()).hexdigest()
+    assert digest == "fc8af36568937693e1eb4282051ff7a50bb9feebf64a977040b99c8b56122af8", digest
+    with zipfile.ZipFile(original) as archive:
+        assert set(archive.namelist()) == {"verdict.json", "generated.patch"}
+        old = json.loads(archive.read("verdict.json"))
+        patch = archive.read("generated.patch")
+    assert old["source"] == PRODUCT and old["base"] == BASE
+    assert old["verdict"] == "INCOMPLETE"
+    assert hashlib.sha256(patch).hexdigest() == old["generated_patch_sha256"]
+    REPORT["original"] = old
+    for name in ("format", "unit", "stock-amd64"):
+        assert old["phases"][name]["status"] == "PASS", name
+        REPORT["phases"][name] = old["phases"][name]
+    subprocess.run(["git", "apply", "-"], input=patch, check=True)
+    row["archive_sha256"] = digest
+    row["run"] = "https://github.com/tamird/rules_distroless/actions/runs/41479374343"
+
+
+assert subprocess.check_output(["git", "rev-parse", "HEAD~2"], text=True).strip() == PRODUCT
+assert subprocess.check_output(["git", "rev-parse", "HEAD~3"], text=True).strip() == BASE
+phase("retained", retained)
 phase("candidate-amd64", lambda row: smoke(row, "amd64"))
 phase("candidate-arm64", lambda row: smoke(row, "arm64"))
 # Retain canonical generated changes for the final source commit; no handwritten lock.
