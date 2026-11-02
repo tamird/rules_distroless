@@ -1,0 +1,39 @@
+name: Dpkg status qualification
+on:
+  push:
+    branches: [qualification/dpkg-status-controls]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    if: github.repository == 'tamird/rules_distroless'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 3
+          persist-credentials: false
+      - uses: bazel-contrib/setup-bazel@0.19.0
+      - name: Recover the original package metadata evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/dpkg-status"
+          gh api repos/tamird/rules_distroless/actions/artifacts/13158801706/zip > "$RUNNER_TEMP/dpkg-status/original.zip" || true
+      - name: Qualify remaining package metadata fixtures
+        run: python3 .github/qualification/dpkg_status.py
+      - name: Validate the publication boundary
+        id: boundary
+        if: always()
+        run: python3 .github/qualification/dpkg_status.py --scan
+      - name: Retain bounded source and inventory evidence
+        if: always() && steps.boundary.outcome == 'success'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dpkg-status
+          path: |
+            ${{ runner.temp }}/dpkg-status/public/verdict.json
+            ${{ runner.temp }}/dpkg-status/public/generated.patch
+          if-no-files-found: error
