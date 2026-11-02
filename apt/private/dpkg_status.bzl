@@ -10,17 +10,18 @@ def _dpkg_status_impl(ctx):
     coreutils = ctx.toolchains["@bazel_lib//lib:coreutils_toolchain_type"]
 
     output = ctx.actions.declare_file(ctx.attr.name + ".tar")
+    controls = depset(ctx.files.controls).to_list()
 
     args = ctx.actions.args()
     args.add(bsdtar.tarinfo.binary)
     args.add(output)
     args.add(ctx.executable._gawk.path)
     args.add(coreutils.coreutils_info.bin)
-    args.add_all(ctx.files.controls)
+    args.add_all(controls)
 
     ctx.actions.run(
         executable = ctx.executable._dpkg_status_sh,
-        inputs = ctx.files.controls,
+        inputs = controls,
         outputs = [output],
         tools = [
             bsdtar.default.files,
